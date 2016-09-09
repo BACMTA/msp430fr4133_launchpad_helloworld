@@ -39,9 +39,23 @@
 
 // include section
 #include <msp430fr4133.h>
+#include <stdbool.h>
 
 #include "board.h"
 #include "lcd.h"
+
+#define PWM_MAX 1024
+
+int hour=0;
+int minute=0;
+int second=0;
+bool timeset = false;
+
+int sunrise_hour = 6;
+int sunrise_minute = 0;
+
+int dusk_hour = 20;
+int dusk_minute = 0;
 
 void rtc_init(void)
 {
@@ -71,18 +85,84 @@ void uart_init(void)
     UCA0IE |= UCRXIE;                         // Enable USCI_A0 RX interrupt
 }
 
+int c2d(uint8_t c)
+{
+    if ((c>='0') && (c<='9'))
+        return (c-'0');
+    return -1;
+}
+
+void uart_buffer(uint8_t c)
+{
+    static int s = 0;
+    static int d=0,sec=0,hr=0,min=0;
+    static uint8_t cmd = 0;
+
+    d = c2d(c);
+    if (d<0) s=0;
+
+    switch (s) {
+    case 0: // wait for start letter
+        if ((c=='t') || (c=='s') || (c=='d')){
+            cmd = c;
+            s++;
+        }
+        break;
+    case 1:
+        hr = d*10;
+        s++;
+        break;
+    case 2:
+        hr += d;
+        s++;
+        break;
+    case 3:
+        min = d*10;
+        s++;
+        break;
+    case 4:
+        min += d;
+        if (cmd=='s') {
+            sunrise_hour = hr;
+            sunrise_minute = min;
+            s = 0;
+        }
+        else if (cmd=='d') {
+            dusk_hour = hr;
+            dusk_minute = min;
+        }
+        else s++;
+        break;
+    case 5:
+        sec = d*10;
+        s++;
+        break;
+    case 6:
+        sec += d;
+        hour = hr;
+        minute = min;
+        second = sec;
+        timeset = true;
+        s=0;
+        break;
+    }
+}
+
 void pwm_init(void)
 {
-    P1DIR |= BIT6 | BIT7;                      // P1.7 output
-    P1SEL0 |= BIT6 | BIT7;                     // P1.7 options select
+    P1DIR  |= BIT7;         // P1.7 output
+    P1SEL0 |= BIT7;         // P1.7 options select
 
-    TA0CCR0 = 128;                             // PWM Period/2
-    TA0CCTL1 = OUTMOD_6;                       // TACCR1 toggle/set
-    TA0CCR1 = 32;                              // TACCR1 PWM duty cycle
-    TA0CCTL2 = OUTMOD_6;                       // TACCR2 toggle/set
-    TA0CCR2 = 96;                              // TACCR2 PWM duty cycle
+    TA0CCR0 = PWM_MAX;      // PWM Period/2 (approx. 500Hz)
+    TA0CCTL1 = OUTMOD_6;    // TACCR1 toggle/set
+    TA0CCR1 = PWM_MAX;      // TACCR1 PWM duty cycle
 
-    TA0CTL = TASSEL_1 | MC_3;                  // ACLK, up-down mode
+    TA0CTL = TASSEL__SMCLK | ID__8 | MC__UPDOWN;  // SMCLK, fclk/8, up-down mode
+}
+
+void pwm_set(uint16_t val)
+{
+    TA0CCR1 = val;
 }
 
 // main program body
@@ -92,15 +172,14 @@ int main(void)
 
 	board_init(); // init dco and leds
 	rtc_init();
-	//pwm_init();
+	pwm_init();
 	uart_init();
 	lcd_init();
 
-    PM5CTL0 &= ~LOCKLPM5;
+	static uint16_t pwm = PWM_MAX;
+	static uint16_t desired_pwm = PWM_MAX;
 
-    int hour=0;
-    int minute=0;
-    int second=0;
+    PM5CTL0 &= ~LOCKLPM5;
 
 	while(1)
 	{
@@ -116,23 +195,41 @@ int main(void)
 
 	    __bis_SR_register(LPM3_bits | GIE);
 
-        showChar('0'+hour%10,pos2);
-        showChar('0'+minute%10,pos4);
+        if (timeset) {
+            showChar('0'+hour%10,pos2);
+            showChar('0'+minute%10,pos4);
 
-        second++;
-        if (second>=60) {
-            second=0;
-            minute++;
-            if (minute>=60) {
-                minute=0;
-                hour++;
-                if (hour>=24) {
-                    hour=0;
+            second++;
+            if (second>=60) {
+                second=0;
+                minute++;
+                if (minute>=60) {
+                    minute=0;
+                    hour++;
+                    if (hour>=24) {
+                        hour=0;
+                    }
                 }
             }
-        }
 
-        LED_GREEN_SWAP();
+            if ((hour==sunrise_hour) && (minute==sunrise_minute) && (second==0))
+                desired_pwm = 0;
+
+            if ((hour==dusk_hour) && (minute==dusk_minute) && (second==0))
+                desired_pwm = PWM_MAX;
+
+            if (pwm>desired_pwm) pwm--;
+            if (pwm<desired_pwm) pwm++;
+            pwm_set(pwm);
+        }
+        else {
+            showChar(' ',pos1);
+            showChar(' ',pos2);
+            showChar(' ',pos3);
+            showChar(' ',pos4);
+            showChar(' ',pos5);
+            showChar(' ',pos6);
+        }
 
 	    __bis_SR_register(LPM3_bits | GIE);
 	}
@@ -160,12 +257,13 @@ void __attribute__ ((interrupt(USCI_A0_VECTOR))) USCI_A0_ISR (void)
     {
         case USCI_NONE: break;
         case USCI_UART_UCRXIFG: // receive interrupt
-            while(!(UCA0IFG&UCTXIFG));
-            UCA0IFG &=~ UCRXIFG;            // Clear interrupt
-            UCA0TXBUF = UCA0RXBUF;     // Clear buffer
+            UCA0IFG &=~ UCRXIFG;    // Clear interrupt
+            uint8_t c = UCA0RXBUF;  // Clear buffer
+            UCA0TXBUF = c;
+            uart_buffer(c);
             break;
-        case USCI_UART_UCTXIFG: // transmit interrupt
-            UCA0IFG &=~ UCTXIFG;            // Clear interrupt
+        case USCI_UART_UCTXIFG:     // transmit interrupt
+            UCA0IFG &=~ UCTXIFG;    // Clear interrupt
             break;
         case USCI_UART_UCSTTIFG: break;
         case USCI_UART_UCTXCPTIFG: break;
