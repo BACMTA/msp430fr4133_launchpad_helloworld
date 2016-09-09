@@ -18,9 +18,9 @@
 //          --|RST          XOUT|----  -----------    |
 //            |                 |                    ---
 //            |                 |
-//            |           P1.1,2|---> UART (debug output 9.6kBaud)
+//            |           P1.1,0|---> UART (debug output 9.6kBaud)
 //            |                 |
-//            |             P1.0|---> RED LED (active high)
+//            |             P1.0|-X-> RED LED (active high)
 //            |             P4.0|---> GREEN LED (active high)
 //            |                 |
 //            |             P1.2|<--- BTN1 --
@@ -43,6 +43,17 @@
 #include "board.h"
 #include "lcd.h"
 
+void rtc_init(void)
+{
+	P4SEL0 |= BIT1 | BIT2; // set XT1 pin as second function
+	do {
+        CSCTL7 &= ~(XT1OFFG | DCOFFG); // clear XT1 and DCO fault flag
+        SFRIFG1 &= ~OFIFG;
+	} while (SFRIFG1 & OFIFG); // test oscillator fault flag
+	RTCMOD = 16-1;
+	RTCCTL = RTCSS__XT1CLK | RTCSR | RTCPS__1024 | RTCIE;
+}
+
 // main program body
 int main(void)
 {
@@ -50,58 +61,59 @@ int main(void)
 
 	board_init(); // init dco and leds
 	lcd_init();
+	rtc_init();
 
-	LED_RED_ON();
-
-	int symbol = 0;
+    int hour=0;
+    int minute=0;
+    int second=0;
 
 	while(1)
 	{
-	    showChar('H',pos1);
-	    showChar('E',pos2);
-	    showChar('L',pos3);
-	    showChar('L',pos4);
-	    showChar('O',pos5);
-	    showChar(' ',pos6);
-        dispWord(0,symbols);
-		__delay_cycles(10000000);
+        showChar('0'+hour/10,pos1);
+        showChar('0'+hour%10,pos2);
+        showChar('0'+minute/10,pos3);
+        showChar('0'+minute%10,pos4);
+        showChar('0'+second/10,pos5);
+        showChar('0'+second%10,pos6);
 
-	    showChar(' ',pos1);
-	    showChar('W',pos2);
-	    showChar('O',pos3);
-	    showChar('R',pos4);
-	    showChar('L',pos5);
-	    showChar('D',pos6);
+	    dispWordOR(LCD_COLON,pos2);
+	    dispWordOR(LCD_COLON,pos4);
 
-		switch (symbol) {
-        case 0:
-            dispWordOR(LCD_P6_RX|LCD_P6_TX,pos6);
-            dispWordOR(LCD_P3_TRANSMITTER,pos3);
-            break;
-        case 1:
-            dispWord(LCD_HEART,symbols);
-            break;
-        case 2:
-            dispWord(LCD_BANG,symbols);
-            break;
-        case 3:
-            dispWord(LCD_CLOCK,symbols);
-            break;
-        case 4:
-            dispWord(LCD_RSYMBOL,symbols);
-            break;
-        case 5:
-            dispWord(LCD_BATTERY,symbols);
-            break;
-		}
-		symbol++;
-		symbol%=6;
+	    __bis_SR_register(LPM3_bits | GIE);
 
-        __delay_cycles(10000000);
+        showChar('0'+hour%10,pos2);
+        showChar('0'+minute%10,pos4);
+
+        second++;
+        if (second>=60) {
+            second=0;
+            minute++;
+            if (minute>=60) {
+                minute=0;
+                hour++;
+                if (hour>=24) {
+                    hour=0;
+                }
+            }
+        }
 
         LED_GREEN_SWAP();
-        LED_RED_SWAP();
+
+	    __bis_SR_register(LPM3_bits | GIE);
 	}
 
 	return -1;
+}
+
+void __attribute__ ((interrupt(RTC_VECTOR))) RTC_ISR (void)
+{
+    //switch(__even_in_range(RTCIV,RTCIV_RTCIF))
+    switch(RTCIV)
+    {
+        case  RTCIV_NONE:   break;          // No interrupt
+        case  RTCIV_RTCIF:                  // RTC Overflow
+            __bic_SR_register_on_exit(LPM3_bits);
+            break;
+        default: break;
+    }
 }
