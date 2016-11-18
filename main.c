@@ -43,6 +43,7 @@
 
 #include "board.h"
 #include "lcd.h"
+#include "dht.h"
 
 #define PWM_MAX 1024
 
@@ -53,9 +54,11 @@ bool timeset = false;
 
 int sunrise_hour = 6;
 int sunrise_minute = 0;
+int sunrise_mins = 6*60;
 
 int dusk_hour = 20;
 int dusk_minute = 0;
+int dusk_mins = 20*60;
 
 void rtc_init(void)
 {
@@ -125,11 +128,14 @@ void uart_buffer(uint8_t c)
         if (cmd=='s') {
             sunrise_hour = hr;
             sunrise_minute = min;
+            sunrise_mins = hr*60+min;
             s = 0;
         }
         else if (cmd=='d') {
             dusk_hour = hr;
             dusk_minute = min;
+            dusk_mins = hr*60+min;
+            s = 0;
         }
         else s++;
         break;
@@ -165,6 +171,51 @@ void pwm_set(uint16_t val)
     TA0CCR1 = val;
 }
 
+void showTemp(void)
+{
+    int16_t t = dht_temp&~0x8000;
+    uint8_t ct[4];
+    ct[0] = t/1000;
+    ct[1] = t%1000/100;
+    ct[2] = t%100/10;
+    ct[3] = t%10;
+    if (ct[0])
+        showChar('0'+ct[0],pos1);
+    else
+        showChar(' ',pos1);
+    if (dht_temp&0x8000)
+        dispWordOR(LCD_P1_MINUS,pos1);
+    if (ct[0]||ct[1])
+        showChar('0'+ct[1],pos2);
+    else
+        showChar(' ',pos2);
+    showChar('0'+ct[2],pos3);
+    dispWordOR(LCD_DECIMAL,pos3);
+    showChar('0'+ct[3],pos4);
+    showChar(' ',pos5);
+    dispWordOR(LCD_P5_DEGREE,pos5);
+    showChar('C',pos6);
+}
+
+void showHumi(void)
+{
+    uint8_t ch[3];
+    ch[0] = dht_humi/100;
+    ch[1] = dht_humi%100/10;
+    ch[2] = dht_humi%10;
+
+    if (ch[0])
+        showChar('0'+ch[0],pos1);
+    else
+        showChar(' ',pos1);
+    showChar('0'+ch[1],pos2);
+    dispWordOR(LCD_DECIMAL,pos2);
+    showChar('0'+ch[2],pos3);
+    showChar(' ',pos4);
+    showChar('R',pos5);
+    showChar('H',pos6);
+}
+
 // main program body
 int main(void)
 {
@@ -175,6 +226,7 @@ int main(void)
 	pwm_init();
 	uart_init();
 	lcd_init();
+	dht_init();
 
 	static uint16_t pwm = PWM_MAX;
 	static uint16_t desired_pwm = PWM_MAX;
@@ -199,23 +251,14 @@ int main(void)
             showChar('0'+hour%10,pos2);
             showChar('0'+minute%10,pos4);
 
-            second++;
-            if (second>=60) {
-                second=0;
-                minute++;
-                if (minute>=60) {
-                    minute=0;
-                    hour++;
-                    if (hour>=24) {
-                        hour=0;
-                    }
-                }
+            if (sunrise_mins<dusk_mins) {
+                int mins = hour*60+minute;
+                if ((mins>=sunrise_mins) && (mins<dusk_mins))
+                    desired_pwm = 0;
+                else
+                    desired_pwm = PWM_MAX;
             }
-
-            if ((hour==sunrise_hour) && (minute==sunrise_minute) && (second==0))
-                desired_pwm = 0;
-
-            if ((hour==dusk_hour) && (minute==dusk_minute) && (second==0))
+            else
                 desired_pwm = PWM_MAX;
 
             if (pwm>desired_pwm) pwm--;
@@ -231,7 +274,29 @@ int main(void)
             showChar(' ',pos6);
         }
 
-	    __bis_SR_register(LPM3_bits | GIE);
+        __bis_SR_register(LPM3_bits | GIE);
+
+        do {
+            static int dhtcnt=0;
+            if (dhtcnt++>=4) {
+                dhtcnt=0;
+                dht_valid = false;
+                dht_read();
+            }
+
+            if (dht_valid) {
+                int i;
+                showTemp();
+                for (i=0;i<10;i++)
+                    __bis_SR_register(LPM3_bits | GIE);
+                showHumi();
+                for (i=0;i<10;i++)
+                    __bis_SR_register(LPM3_bits | GIE);
+                //dht_valid = false;
+            }
+            else
+                break;
+        } while (!timeset);
 	}
 
 	return -1;
@@ -239,11 +304,30 @@ int main(void)
 
 void __attribute__ ((interrupt(RTC_VECTOR))) RTC_ISR (void)
 {
+    static bool every_second = false;
     //switch(__even_in_range(RTCIV,RTCIV_RTCIF))
     switch(RTCIV)
     {
         case  RTCIV_NONE:   break;          // No interrupt
         case  RTCIV_RTCIF:                  // RTC Overflow
+            if (timeset) {
+                if (every_second) {
+                    second++;
+                    if (second>=60) {
+                        second=0;
+                        minute++;
+                        if (minute>=60) {
+                            minute=0;
+                            hour++;
+                            if (hour>=24) {
+                                hour=0;
+                            }
+                        }
+                    }
+                }
+            }
+            every_second = !every_second;
+
             __bic_SR_register_on_exit(LPM3_bits);
             break;
         default: break;

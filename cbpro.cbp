@@ -28,6 +28,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="board.h" />
+		<Unit filename="dht.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="dht.h" />
 		<Unit filename="lcd.c">
 			<Option compilerVar="CC" />
 		</Unit>
